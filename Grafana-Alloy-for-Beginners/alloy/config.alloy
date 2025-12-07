@@ -31,3 +31,70 @@ loki.write "mythical" {
        url = "http://loki:3100/loki/api/v1/push"
     } 
 }
+
+//Section 2
+discovery.http "service_discovery" {
+    url = "http://service-discovery/targets.json"
+    refresh_interval = "2s"
+}
+
+prometheus.scrape "infrastructure" {
+    scrape_interval = "2s"
+    scrape_timeout  = "2s"
+
+    targets    = discovery.http.service_discovery.targets
+    forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.remote_write "mimir" {
+   endpoint {
+    url = "http://mimir:9009/api/v1/push"
+   }
+}
+
+//section 3
+
+//Section 3
+prometheus.exporter.postgres "mythical" {
+    data_source_names = ["postgresql://postgres:mythical@mythical-database:5432/postgres?sslmode=disable"]
+}
+
+prometheus.scrape "postgres" {
+    scrape_interval = "2s"
+    scrape_timeout  = "2s"
+
+    targets    =  prometheus.exporter.postgres.mythical.targets
+    forward_to =  [prometheus.relabel.postgres.receiver]
+}
+
+prometheus.relabel "postgres" {
+    forward_to =  [prometheus.remote_write.mimir.receiver]
+
+    rule {
+        target_label = "group"
+        replacement  = "infrastructure"
+    }
+    
+    rule {
+        target_label = "service"
+        replacement  = "postgres"
+    }
+
+ //What we have: {instance="postgresql://mythical-database:5432/postgres"}
+ //What we want: {instance="mythical-database:5432/postgres"}
+    
+    rule {
+        // Replace a label's value.
+        action        = "replace"
+
+        // The label we want to replace is 'instance'.
+        target_label  = "instance"
+
+        // Look in the existing 'instance' label for anything starting with postgresql:// and capture what follows.
+        source_labels = ["instance"]
+        regex         = "^postgresql://(.+)"
+        
+        // Replace the value with just the captured part, leaving out the prefix.
+        replacement   = "$1"
+    }
+}
