@@ -2,15 +2,17 @@ livedebugging {
   enabled = true
 }
 
-// This is the config that Alloy will use. We will be filling this out
-// in the hands-on sections and exercises
-//Section 1 - Loki Setup
+// Section 1 - Infrastructure logs with alloy
+
+// --- Collect Logs from Alloy using the logging block
 
 logging {
   format = "logfmt" 
   level  = "debug"
   write_to = [loki.relabel.alloy_logs.receiver]
 }
+
+// --- Use loki.relabel to add labels to the Logs
 
 loki.relabel "alloy_logs" {
    forward_to = [loki.write.mythical.receiver]
@@ -26,17 +28,24 @@ loki.relabel "alloy_logs" {
     }
 }
 
+// -- Use loki.write to export logs to Loki
+
 loki.write "mythical" {
     endpoint {
        url = "http://loki:3100/loki/api/v1/push"
     } 
 }
 
-//Section 2
+//Section 2 - Infrastructure metrics with Alloy
+
+// Use the discovery.http component to discover the targets to scrape using service discovery
+
 discovery.http "service_discovery" {
     url = "http://service-discovery/targets.json"
     refresh_interval = "2s"
 }
+
+// scrape the target metrics using the prometheus.scrape components
 
 prometheus.scrape "infrastructure" {
     scrape_interval = "2s"
@@ -46,6 +55,8 @@ prometheus.scrape "infrastructure" {
     forward_to = [prometheus.remote_write.mimir.receiver]
 }
 
+// Use prometheus.remote_write component to export metrics to the locally running mimir.
+
 prometheus.remote_write "mimir" {
    endpoint {
     url = "http://mimir:9009/api/v1/push"
@@ -54,10 +65,13 @@ prometheus.remote_write "mimir" {
 
 //section 3
 
-//Section 3
+// Expose metrics from the postgres DB Using prometheus.exporter.postgres components
+
 prometheus.exporter.postgres "mythical" {
     data_source_names = ["postgresql://postgres:mythical@mythical-database:5432/postgres?sslmode=disable"]
 }
+
+// Scrape metrics from the postgress using the prometheus.scrape component
 
 prometheus.scrape "postgres" {
     scrape_interval = "2s"
@@ -67,8 +81,11 @@ prometheus.scrape "postgres" {
     forward_to =  [prometheus.relabel.postgres.receiver]
 }
 
+// Use the prometheus.relabel to add and modify labels
+
 prometheus.relabel "postgres" {
     forward_to =  [prometheus.remote_write.mimir.receiver]
+// Export metrics to Mimir using the prometheus.remote_write component (See section: 3 for the mimir end point)
 
     rule {
         target_label = "group"
@@ -100,15 +117,19 @@ prometheus.relabel "postgres" {
 }
 
 //Section 4
+// Scrape metrics from the Application using the prometheus.scrape component (Manually)
+// prometheus.write.queue - collects metrics sent from other components into a Write-Ahead Log (WAL) and forwards them over the network to a series of user-supplied endpoints.
+
 prometheus.scrape "mythical" {
     scrape_interval = "2s"
     scrape_timeout  = "2s"
 
-    targets    =  [
-        {"__address__"= "mythical-server:4000", group = "mythical", service = "mythical-server"},
-        {"__address__"= "mythical-requester:4000", group = "mythical", service = "mythical-requester"},
-        ]
-    forward_to =  [prometheus.write.queue.experimental.receiver]
+    targets = [
+        {"__address__" = "mythical-server:4000", group = "mythical", service = "mythical-server"},
+        {"__address__" = "mythical-requester:4001", group = "mythical", service = "mythical-requester"}, 
+    ]
+
+    forward_to = [prometheus.write.queue.experimental.receiver]
 }
 
 prometheus.write.queue "experimental" {
@@ -118,6 +139,9 @@ prometheus.write.queue "experimental" {
 }
 
 //Section 5
+
+// Recieve spans using otelcol.receiver.otlp component
+
 otelcol.receiver.otlp "otlp_receiver" {
     grpc {
         endpoint = "0.0.0.0:4317"
@@ -132,6 +156,8 @@ otelcol.receiver.otlp "otlp_receiver" {
     }
 }
 
+// Batch spans using otelcol.processor.otlp component
+
 otelcol.processor.batch "default" {
     output {
         traces = [
@@ -145,6 +171,8 @@ otelcol.processor.batch "default" {
 	timeout = "2s"
 }
 
+// Export spans using otelcol.exporter.otlp component
+
 otelcol.exporter.otlp "tempo" {
     client {
         endpoint = "http://tempo:4317"
@@ -157,3 +185,37 @@ otelcol.exporter.otlp "tempo" {
     }
 }
 
+
+// Section 6 - Application logs with Alloy
+
+// Logs sent over HTTP from the applications to th loki.source.api
+//  loki.source.api forward the logs to loki.process
+// loki process extract the information like timestamp and adding labels and sent to loki.write
+// series of stages during process time.
+// Processed logs forward (Section:1 component) to loki using loki.write 
+
+loki.source.api "mythical" {
+    http {
+        listen_address = "0.0.0.0"
+        listen_port    = "3100"
+    }
+    forward_to = [loki.process.mythical.receiver]
+}
+
+loki.process "mythical" {
+    stage.static_labels {
+        values = {
+           service = "mythical",
+        }
+    }
+    stage.regex {
+            expression=`^.*?loggedtime=(?P<loggedtime>\S+)`
+    }
+
+    stage.timestamp {
+        source = "loggedtime"
+        format = "2026-12-12T15:04:05.000Z07:00"
+    }
+
+    forward_to = [loki.write.mythical.receiver]
+}
