@@ -129,9 +129,27 @@ prometheus.scrape "mythical" {
         {"__address__" = "mythical-requester:4001", group = "mythical", service = "mythical-requester"}, 
     ]
 
-    forward_to = [prometheus.write.queue.experimental.receiver]
+//    forward_to = [prometheus.write.queue.experimental.receiver]
+      forward_to = [prometheus.relabel.mission_2.receiver]
 }
+prometheus.relabel "mission_2" {
+    forward_to = [prometheus.write.queue.experimental.receiver]
 
+  //define a relabel rule to extract the cloud provider from the instance_id label and add it as a new label called cloud_provider
+    rule {
+        action        = "replace"
+        target_label  = "cloud_provider"
+        source_labels = ["instance_id"]
+        regex         = "^(aws|gcp|azure)-.+"
+        replacement   = "$1"
+    }
+
+    // drop the instance_id label from metrics
+    rule {
+        action  = "labeldrop"
+        regex   = "instance_id"
+    }
+}
 prometheus.write.queue "experimental" {
     endpoint "mimir" {
         url = "http://mimir:9009/api/v1/push"
@@ -215,6 +233,52 @@ loki.process "mythical" {
     stage.timestamp {
         source = "loggedtime"
         format = "2026-12-12T15:04:05.000Z07:00"
+    }
+
+    forward_to = [loki.write.mythical.receiver]
+}
+
+//Section 7
+otelcol.connector.spanlogs "autologging" {
+    roots = true
+    spans = false
+    processes = false
+
+    span_attributes = ["http.method", "http.target", "http.status_code"]
+
+    output {
+        logs = [otelcol.exporter.loki.autologging.input]
+    }
+}
+
+otelcol.exporter.loki "autologging" {
+    forward_to = [loki.process.autologging.receiver]
+}
+
+loki.process "autologging" {
+    stage.json {
+       expressions = {"body" = ""}
+    }
+
+    stage.output {
+       source = "body"
+    }
+
+    stage.logfmt {
+        mapping = {
+            http_method_extracted      = "http.method",
+            http_status_code_extracted = "http.target",
+            http_target_extracted      = "http.status_code",
+
+        }
+    }
+
+    stage.labels {
+        values = {
+            method = "http_method_extracted",
+            status = "http_status_code_extracted",
+            target = "http_target_extracted",
+        }
     }
 
     forward_to = [loki.write.mythical.receiver]
